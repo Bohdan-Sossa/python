@@ -7,6 +7,14 @@ from matplotlib.patches import Rectangle
 # --- Налаштування сторінки ---
 st.set_page_config(page_title="Гідравлічний розрахунок", layout="wide")
 
+# --- Блок безпеки ---
+# Перевіряємо, чи ввів користувач правильний пароль
+password = st.sidebar.text_input("Введіть пароль для доступу", type="password")
+
+if password != st.secrets["PASSWORD"]:
+    st.sidebar.warning("Невірний пароль.")
+    st.stop()
+
 st.title("Гідравлічний розрахунок водовідведення")
 st.markdown("Порівняння методів: **Формула Маннінга** vs **Методика ДБН**")
 
