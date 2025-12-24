@@ -1,33 +1,49 @@
+import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
-import pandas as pd
 from matplotlib.patches import Rectangle
 
-# --- Вхідні параметри ---
-n_manning = 0.013
-phi = 0.95
-# Словник інтенсивностей: {Q20 (л/с*га) : q (м/с)}
-q_scenarios = {
-    104.0: 0.0000104,
-    166.7: 0.00001667
+# --- Налаштування сторінки ---
+st.set_page_config(page_title="Гідравлічний розрахунок", layout="wide")
+
+st.title("Гідравлічний розрахунок водовідведення")
+st.markdown("Порівняння методів: **Формула Маннінга** vs **Методика ДБН**")
+
+# --- Вхідні параметри (Sidebar) ---
+st.sidebar.header("Вхідні дані")
+
+# 1. Інтенсивність опадів
+# Словник інтенсивностей: {Відображення : (Q20, q)}
+# Ви можете розширити цей список у майбутньому
+precip_options = {
+    "Варіант 1 (Q20=104 л/с*га)": (104.0, 0.0000104),
+    "Варіант 2 (Q20=166.7 л/с*га)": (166.7, 0.00001667)
 }
 
-# ДБН параметри
+selected_precip = st.sidebar.selectbox("Інтенсивність опадів", list(precip_options.keys()))
+q20_val, q_man_val = precip_options[selected_precip]
+
+# 2. Геометрія
+st.sidebar.subheader("Геометрія водозбору")
+L_drain = st.sidebar.number_input("Довжина водозбору L (м)", value=6.0, step=0.5, min_value=0.1)
+W_bridge = st.sidebar.number_input("Ширина водозбору W (м)", value=15.0, step=0.5, min_value=0.1)
+i_long_pct = st.sidebar.number_input("Поздовжній ухил (%)", value=2.0, step=0.1, min_value=0.0)
+i_trans_pct = st.sidebar.number_input("Поперечний ухил (%)", value=2.5, step=0.1, min_value=0.0)
+
+# Переведення відсотків у частки
+i_long = i_long_pct / 100.0
+i_trans = i_trans_pct / 100.0
+
+# Константи
+n_manning = 0.013
+phi = 0.95
 mr = 143
 gamma_exp = 1.82
 P = 5
 n_exp = 0.71
 
-# Геометрія
-L_drain = 6.0
-i_trans = 0.025
-W_list = np.arange(4.5, 18.0, 1.0) 
-i_long_list = np.arange(0.0, 4.1, 0.1) / 100 
-span_lengths = [40, 80, 120]
-delta_i_deflection = 0.005 # Зменшення ухилу через прогин (0.5%)
-
-# --- Допоміжні функції ---
+# --- Функції розрахунку ---
 def get_dbn_params(q20_val, P_val, L_val, W_val):
     t_con = 2.0
     v_avg_surface = 0.5
@@ -49,29 +65,26 @@ def get_dbn_params(q20_val, P_val, L_val, W_val):
     gamma_dist = 1.0 if F_ha < 500 else 0.95
     return A, z_mid, gamma_dist, tr, n_exp
 
-def calculate_max_depth_manning(q_int, W, L, i_long):
-    i_safe = max(i_long, 0.00001) 
+def calculate_max_depth_manning(q_int, W, L, i_l):
+    i_safe = max(i_l, 0.00001) 
     Q = phi * q_int * L * W
     h = (Q * n_manning / (W * (i_safe**0.5)))**0.6
     return max(h, 0)
 
-def calculate_max_depth_dbn(q20_val, W, L, i_long):
+def calculate_max_depth_dbn(q20_val, W, L, i_l):
     A, z_mid, gamma_dist, tr, n_val = get_dbn_params(q20_val, P, L, W)
     F_ha_total = (L * W) / 10000
     qr_peak = z_mid * A * F_ha_total * gamma_dist / (tr**n_val)
     Q_peak = qr_peak / 1000
-    i_safe = max(i_long, 0.00001)
+    i_safe = max(i_l, 0.00001)
     h = (Q_peak * n_manning / (W * (i_safe**0.5)))**0.6
     return max(h, 0)
 
-def calculate_depth_visualization(X, Y, q_manning_val, q20_val, W_val, L_val, i_l, method='manning'):
-    """
-    Розраховує профіль глибини для візуалізації (без врахування i_trans).
-    """
+def calculate_depth_array(X, q_val, q20_val, W_val, L_val, i_l, method='manning'):
+    """Розрахунок масиву глибин для графіків"""
     i_safe = np.maximum(i_l, 0.00001)
-    
     if method == 'manning':
-        Q_at_x = phi * q_manning_val * X * W_val 
+        Q_at_x = phi * q_val * X * W_val 
         h_x = (Q_at_x * n_manning / (W_val * (i_safe**0.5)))**0.6
     else: # dbn
         A, z_mid, gamma_dist, tr, n_val = get_dbn_params(q20_val, P, L_val, W_val)
@@ -80,118 +93,78 @@ def calculate_depth_visualization(X, Y, q_manning_val, q20_val, W_val, L_val, i_
         Q_peak = qr_peak / 1000
         Q_at_x = Q_peak * (X / L_val)
         h_x = (Q_at_x * n_manning / (W_val * (i_safe**0.5)))**0.6
-    
     return np.maximum(h_x, 0)
 
-# --- Генерація Таблиці (Excel) ---
-print("Розрахунок повної таблиці...")
-results_data = []
+# --- Основна логіка ---
 
-for q20_val, q_man_val in q_scenarios.items():
-    for L_span in span_lengths:
-        for W in W_list:
-            for i_long_design in i_long_list:
-                # Unloaded
-                i_eff_unloaded = i_long_design
-                h_man = calculate_max_depth_manning(q_man_val, W, L_drain, i_eff_unloaded) * 1000
-                h_dbn = calculate_max_depth_dbn(q20_val, W, L_drain, i_eff_unloaded) * 1000
-                results_data.append({
-                    "Q": q20_val, "Span": L_span, "W": W, "State": "Unloaded",
-                    "i_des%": round(i_long_design*100, 2), "i_eff%": round(i_eff_unloaded*100, 2),
-                    "h_man": h_man, "h_dbn": h_dbn
-                })
-                # Loaded
-                i_eff_loaded = max(i_long_design - delta_i_deflection, 0.00001)
-                h_man = calculate_max_depth_manning(q_man_val, W, L_drain, i_eff_loaded) * 1000
-                h_dbn = calculate_max_depth_dbn(q20_val, W, L_drain, i_eff_loaded) * 1000
-                results_data.append({
-                    "Q": q20_val, "Span": L_span, "W": W, "State": "Loaded",
-                    "i_des%": round(i_long_design*100, 2), "i_eff%": round(i_eff_loaded*100, 2),
-                    "h_man": h_man, "h_dbn": h_dbn
-                })
-
-df = pd.DataFrame(results_data)
-df.to_excel("bridge_drainage_results.xlsx", index=False)
-print("Таблицю збережено: bridge_drainage_results.xlsx")
-
-# --- Генерація Графіків ---
-print("Генерація графіків (3D та 2D)...")
-
-# Ваш оновлений список ухилів
-i_plots_pct = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
-
-W_plot = 15.0 
-L_plot_geom = L_drain
-
-# Сітка
-x = np.linspace(0, L_plot_geom, 50)
-y = np.linspace(0, W_plot, 50)
-X, Y = np.meshgrid(x, y)
-
-# *** ГОЛОВНИЙ ЦИКЛ ПО ІНТЕНСИВНОСТЯХ (Q=104 та Q=166.7) ***
-for q20_key, q_man_val in q_scenarios.items():
-    print(f"Обробка сценарію Q={q20_key}...")
+if st.sidebar.button("Розрахувати", type="primary"):
     
-    for i_val in i_plots_pct:
-        i_des = i_val / 100.0
-        # Навантажений стан:
-        i_eff = max(i_des - delta_i_deflection, 0.00001)
+    # 1. Розрахунок максимальних глибин
+    h_max_man = calculate_max_depth_manning(q_man_val, W_bridge, L_drain, i_long) * 1000
+    h_max_dbn = calculate_max_depth_dbn(q20_val, W_bridge, L_drain, i_long) * 1000
+    
+    # 2. Виведення числових результатів
+    st.subheader("Результати розрахунку (максимальна глибина)")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric(label="За Маннінгом", value=f"{h_max_man:.2f} мм")
+    with col2:
+        st.metric(label="За ДБН", value=f"{h_max_dbn:.2f} мм")
+        delta = h_max_dbn - h_max_man
+    with col3:
+        st.metric(label="Різниця (ДБН - Маннінг)", value=f"{delta:.2f} мм", delta_color="off")
+
+    st.markdown("---")
+
+    # 3. Підготовка даних для графіків
+    x_plot = np.linspace(0, L_drain, 50)
+    y_plot = np.linspace(0, W_bridge, 50)
+    X, Y = np.meshgrid(x_plot, y_plot)
+    
+    # Розрахунок поверхонь
+    Z_man = calculate_depth_array(X, q_man_val, q20_val, W_bridge, L_drain, i_long, 'manning') * 1000
+    Z_dbn = calculate_depth_array(X, q_man_val, q20_val, W_bridge, L_drain, i_long, 'dbn') * 1000
+
+    # 4. Графіки
+    tab1, tab2 = st.tabs(["2D Профіль", "3D Візуалізація"])
+
+    with tab1:
+        st.subheader(f"Профіль глибини вздовж довжини L={L_drain}м")
         
-        # Розрахунок (мм)
-        Z_man = calculate_depth_visualization(X, Y, q_man_val, q20_key, W_plot, L_plot_geom, i_eff, 'manning') * 1000
-        Z_dbn = calculate_depth_visualization(X, Y, q_man_val, q20_key, W_plot, L_plot_geom, i_eff, 'dbn') * 1000
+        # Беремо профіль (перший рядок масиву, оскільки вздовж X глибина змінюється, вздовж Y у цій моделі - константа для перерізу)
+        h_man_prof = Z_man[0, :]
+        h_dbn_prof = Z_dbn[0, :]
         
-        # === 1. Побудова 3D Графіка (Суцільні кольори) ===
-        fig_3d = plt.figure(figsize=(12, 9))
+        fig_2d, ax1 = plt.subplots(figsize=(10, 5))
+        ax1.plot(x_plot, h_man_prof, color='deepskyblue', linewidth=2.5, label='Manning')
+        ax1.plot(x_plot, h_dbn_prof, color='salmon', linestyle='--', linewidth=2.5, label='DBN')
+        
+        ax1.set_ylabel('Глибина h (мм)')
+        ax1.set_xlabel('Довжина водозбору L (м)')
+        ax1.set_title(f'Гідравлічний профіль (Ухил {i_long_pct}%)')
+        ax1.grid(True, which='both', linestyle='--', alpha=0.7)
+        ax1.legend()
+        
+        st.pyplot(fig_2d)
+
+    with tab2:
+        st.subheader("3D Порівняння поверхонь води")
+        fig_3d = plt.figure(figsize=(10, 8))
         ax = fig_3d.add_subplot(111, projection='3d')
         
         surf1 = ax.plot_surface(X, Y, Z_man, color='deepskyblue', alpha=0.6, shade=True)
         surf2 = ax.plot_surface(X, Y, Z_dbn, color='salmon', alpha=0.6, shade=True)
         
-        ax.set_xlabel('Length of drain L (m)', fontsize=11, labelpad=10)
-        ax.set_ylabel('Width of bridge W (m)', fontsize=11, labelpad=10)
-        ax.set_zlabel('Depth (mm)', fontsize=11, labelpad=10)
-        
-        ax.set_title(f'3D Comparison: Manning vs DBN (Q={q20_key})\n'
-                     f'Design Slope i={i_val}%  ->  Effective Slope i={i_eff*100:.2f}% (Loaded)', fontsize=14)
+        ax.set_xlabel('Довжина L (м)')
+        ax.set_ylabel('Ширина W (м)')
+        ax.set_zlabel('Глибина (мм)')
         
         p1 = Rectangle((0, 0), 1, 1, fc='deepskyblue', alpha=0.6)
         p2 = Rectangle((0, 0), 1, 1, fc='salmon', alpha=0.6)
-        ax.legend([p1, p2], ['Manning Method', 'DBN Method'], loc='upper left', fontsize=12)
+        ax.legend([p1, p2], ['Manning', 'DBN'], loc='upper left')
         
-        # Ім'я файлу включає Q
-        fname_3d = f'3D_Solid_Q{int(q20_key)}_i_{i_val}pct.png'
-        plt.savefig(fname_3d)
-        plt.close()
+        st.pyplot(fig_3d)
 
-        # === 2. Побудова 2D Графіків (Профілі) ===
-        h_man_prof = Z_man[0, :]
-        h_dbn_prof = Z_dbn[0, :]
-        x_prof = x
-        
-        fig_2d, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
-        
-        ax1.plot(x_prof, h_man_prof, color='deepskyblue', linewidth=2.5, label='Manning')
-        ax1.plot(x_prof, h_dbn_prof, color='salmon', linestyle='--', linewidth=2.5, label='DBN')
-        ax1.set_ylabel('Depth h (mm)', fontsize=12)
-        ax1.set_xlabel('Drain Length L (m)', fontsize=12)
-        ax1.set_title(f'2D Hydraulic Profile (Q={q20_key}, Design i={i_val}%, Eff i={i_eff*100:.2f}%)', fontsize=13)
-        ax1.grid(True, which='both', linestyle='--', alpha=0.7)
-        ax1.legend(fontsize=11)
-        
-        delta = h_dbn_prof - h_man_prof
-        ax2.plot(x_prof, delta, color='black', linewidth=1.5)
-        ax2.fill_between(x_prof, delta, 0, where=(delta>0), color='salmon', alpha=0.3, label='DBN > Manning')
-        ax2.fill_between(x_prof, delta, 0, where=(delta<0), color='deepskyblue', alpha=0.3, label='Manning > DBN')
-        ax2.set_ylabel('Difference (mm)', fontsize=12)
-        ax2.set_xlabel('Drain Length L (m)', fontsize=12)
-        ax2.set_title('Difference (H_DBN - H_Manning)', fontsize=13)
-        ax2.grid(True, which='both', linestyle='--', alpha=0.7)
-        ax2.legend(fontsize=11)
-        
-        plt.tight_layout()
-        fname_2d = f'2D_Profile_Q{int(q20_key)}_i_{i_val}pct.png'
-        plt.savefig(fname_2d)
-        plt.close()
-        
-    print(f"Графіки для Q={q20_key} завершено.")
+else:
+    st.info("Введіть параметри зліва та натисніть 'Розрахувати'")
